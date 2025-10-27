@@ -1,0 +1,99 @@
+```toml
+[package]
+name = "final_cli_v1.0_std"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+post_quantum_crypto = { path = "../post_quantum_crypto" }
+aes-gcm = "0.10"
+sha3 = "0.10"
+hex = "0.4"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+chrono = "0.4"
+clap = "4.0"
+```
+
+```rust
+use post_quantum_crypto::apps::firmware::KyberDilithiumFirmwareSigner;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use sha3::{Sha3_256, Digest};
+use std::fs;
+use clap::{Arg, Command};
+use chrono::Utc;
+
+fn main() {
+    let matches = Command::new("FINAL_Cli_v1.0_std")
+        .subcommand(Command::new("sign").arg(Arg::new("file").required(true)))
+        .subcommand(Command::new("verify").arg(Arg::new("file").required(true)))
+        .get_matches();
+
+    let signer = KyberDilithiumFirmwareSigner::new();
+    match matches.subcommand() {
+        Some(("sign", args)) => sign(&signer, args.value_of("file").unwrap()),
+        Some(("verify", args)) => verify(&signer, args.value_of("file").unwrap()),
+        _ => println!("Usage: sign <firmware.bin> or verify <firmware.signed.json>"),
+    }
+}
+
+fn sign(signer: &KyberDilithiumFirmwareSigner, file: &str) {
+    let data = fs::read(file).unwrap();
+    let (ct, iv, tag, encrypted, sig, kyber_pk, dilithium_pk, hash, ts) = signer.sign_firmware(&data).unwrap();
+    let proof = serde_json::json!({
+        "kyber_ciphertext": hex::encode(&ct),
+        "aes_iv": hex::encode(&iv),
+        "aes_tag": hex::encode(&tag),
+        "encrypted_firmware": hex::encode(&encrypted),
+        "dilithium_signature": hex::encode(&sig),
+        "kyber_public_key": hex::encode(&kyber_pk),
+        "dilithium_public_key": hex::encode(&dilithium_pk),
+        "manifest_hash": hash,
+        "timestamp": ts,
+        "filename": file
+    });
+    fs::write(format!("{}.signed.json", file), proof.to_string()).unwrap();
+    println!("Signed: {}.signed.json", file);
+}
+
+fn verify(signer: &KyberDilithiumFirmwareSigner, file: &str) {
+    let json = fs::read_to_string(file).unwrap();
+    let proof = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+    let ct = hex::decode(proof["kyber_ciphertext"].as_str().unwrap()).unwrap();
+    let iv = hex::decode(proof["aes_iv"].as_str().unwrap()).unwrap();
+    let tag = hex::decode(proof["aes_tag"].as_str().unwrap()).unwrap();
+    let encrypted = hex::decode(proof["encrypted_firmware"].as_str().unwrap()).unwrap();
+    let sig = hex::decode(proof["dilithium_signature"].as_str().unwrap()).unwrap();
+    let kyber_pk = hex::decode(proof["kyber_public_key"].as_str().unwrap()).unwrap();
+    let dilithium_pk = hex::decode(proof["dilithium_public_key"].as_str().unwrap()).unwrap();
+    let hash = proof["manifest_hash"].as_str().unwrap().to_string();
+    let ts = proof["timestamp"].as_str().unwrap().to_string();
+    if signer.verify_firmware(&ct, &iv, &tag, &encrypted, &sig, &kyber_pk, &dilithium_pk, &hash, &ts).unwrap() {
+        println!("Verified");
+    } else {
+        println!("Failed");
+    }
+}
+```
+
+---
+
+**FINAL_Cli_v1.0_std**  
+- `./final_cli_v1.0_std sign firmware.bin` → `firmware.bin.signed.json`  
+- `./final_cli_v1.0_std verify firmware.bin.signed.json` → Verified  
+
+---
+
+**Build & Run:**
+```bash
+cargo build --release
+./target/release/final_cli_v1.0_std sign firmware.bin
+```
+
+---
+
+**Next?**  
+Say: **Make GUI**  
+→ I’ll give you **FINAL_Gui_v1.0_core**
+
+**Go.**

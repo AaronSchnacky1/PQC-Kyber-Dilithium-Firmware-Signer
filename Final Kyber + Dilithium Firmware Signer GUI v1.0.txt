@@ -1,0 +1,156 @@
+```toml
+[package]
+name = "final_gui_v1.0_core"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+post_quantum_crypto = { path = "../post_quantum_crypto" }
+eframe = "0.24"
+hex = "0.4"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+```
+
+```rust
+use eframe::egui;
+use post_quantum_crypto::apps::firmware::KyberDilithiumFirmwareSigner;
+use std::fs;
+
+#[derive(Default)]
+struct FirmwareApp {
+    file_path: Option<String>,
+    status: String,
+    mode: Mode,
+}
+
+#[derive(Default, PartialEq)]
+enum Mode { Sign, Verify }
+
+impl eframe::App for FirmwareApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Kyber + Dilithium Firmware Signer v1.0");
+
+            ui.horizontal(|ui| {
+                if ui.selectable_label(self.mode == Mode::Sign, "Sign").clicked() { self.mode = Mode::Sign; }
+                if ui.selectable_label(self.mode == Mode::Verify, "Verify").clicked() { self.mode = Mode::Verify; }
+            });
+
+            if ui.button("Choose File").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_file() {
+                    self.file_path = Some(path.display().to_string());
+                    self.status = "".to_string();
+                }
+            }
+
+            if let Some(path) = &self.file_path {
+                ui.label(format!("File: {}", path));
+                let btn_text = if self.mode == Mode::Sign { "Sign Firmware" } else { "Verify Firmware" };
+                if ui.button(btn_text).clicked() {
+                    if self.mode == Mode::Sign {
+                        self.sign_firmware(path);
+                    } else {
+                        self.verify_firmware(path);
+                    }
+                }
+            }
+
+            if !self.status.is_empty() {
+                ui.label(&self.status);
+            }
+        });
+    }
+}
+
+impl FirmwareApp {
+    fn sign_firmware(&mut self, path: &str) {
+        let data = match fs::read(path) {
+            Ok(d) => d,
+            Err(e) => { self.status = format!("Read error: {}", e); return; }
+        };
+        let signer = KyberDilithiumFirmwareSigner::new();
+        let (ct, iv, tag, enc, sig, kpk, dpk, hash, ts) = match signer.sign_firmware(&data) {
+            Ok(v) => v,
+            Err(e) => { self.status = format!("Sign error: {:?}", e); return; }
+        };
+        let proof = serde_json::json!({
+            "kyber_ciphertext": hex::encode(&ct),
+            "aes_iv": hex::encode(&iv),
+            "aes_tag": hex::encode(&tag),
+            "encrypted_firmware": hex::encode(&enc),
+            "dilithium_signature": hex::encode(&sig),
+            "kyber_public_key": hex::encode(&kpk),
+            "dilithium_public_key": hex::encode(&dpk),
+            "manifest_hash": hash,
+            "timestamp": ts,
+            "filename": std::path::Path::new(path).file_name().unwrap().to_string_lossy()
+        });
+        let out = format!("{}.signed.json", path);
+        if fs::write(&out, proof.to_string()).is_ok() {
+            self.status = format!("Signed → {}", out);
+        } else {
+            self.status = "Save failed".to_string();
+        }
+    }
+
+    fn verify_firmware(&mut self, path: &str) {
+        let json = match fs::read_to_string(path) {
+            Ok(j) => j,
+            Err(e) => { self.status = format!("Read error: {}", e); return; }
+        };
+        let proof: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(p) => p,
+            Err(e) => { self.status = format!("JSON error: {}", e); return; }
+        };
+        let ct = hex::decode(proof["kyber_ciphertext"].as_str().unwrap()).unwrap();
+        let iv = hex::decode(proof["aes_iv"].as_str().unwrap()).unwrap();
+        let tag = hex::decode(proof["aes_tag"].as_str().unwrap()).unwrap();
+        let enc = hex::decode(proof["encrypted_firmware"].as_str().unwrap()).unwrap();
+        let sig = hex::decode(proof["dilithium_signature"].as_str().unwrap()).unwrap();
+        let kpk = hex::decode(proof["kyber_public_key"].as_str().unwrap()).unwrap();
+        let dpk = hex::decode(proof["dilithium_public_key"].as_str().unwrap()).unwrap();
+        let hash = proof["manifest_hash"].as_str().unwrap().to_string();
+        let ts = proof["timestamp"].as_str().unwrap().to_string();
+
+        let signer = KyberDilithiumFirmwareSigner::new();
+        if signer.verify_firmware(&ct, &iv, &tag, &enc, &sig, &kpk, &dpk, &hash, &ts).unwrap() {
+            self.status = "Verified".to_string();
+        } else {
+            self.status = "Failed".to_string();
+        }
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions::default();
+    eframe::run_native(
+        "Firmware Signer",
+        options,
+        Box::new(|_cc| Box::new(FirmwareApp::default())),
+    )
+}
+```
+
+---
+
+**FINAL_Gui_v1.0_core**  
+- Click **Sign** or **Verify**  
+- Choose file → **Sign Firmware** → `firmware.bin.signed.json`  
+- Or **Verify Firmware** → Verified  
+
+---
+
+**Build & Run:**
+```bash
+cargo build --release
+./target/release/final_gui_v1.0_core
+```
+
+---
+
+**Next?**  
+Say: **Make Android**  
+→ I’ll give you **FINAL_Android_v1.0.apk**
+
+**Go.**

@@ -1,0 +1,179 @@
+```kotlin
+// MainActivity.kt
+package com.pqcnotary
+
+import android.os.Bundle
+import android.widget.*
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import kotlinx.coroutines.*
+import java.io.File
+import android.graphics.Color
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var modeGroup: RadioGroup
+    private lateinit var status: TextView
+    private lateinit var actionBtn: Button
+    private var isSign = true
+    private var fileUri: android.net.Uri? = null
+
+    private val pickFile = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let {
+            fileUri = it
+            actionBtn.text = if (isSign) "Sign Firmware" else "Verify Firmware"
+            actionBtn.isEnabled = true
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        modeGroup = findViewById(R.id.mode_group)
+        status = findViewById(R.id.status)
+        actionBtn = findViewById(R.id.action_btn)
+
+        modeGroup.setOnCheckedChangeListener { _, id ->
+            isSign = id == R.id.sign_mode
+            actionBtn.text = "Choose File"
+            actionBtn.isEnabled = false
+            fileUri = null
+            status.text = ""
+        }
+
+        actionBtn.setOnClickListener {
+            if (actionBtn.text == "Choose File") {
+                pickFile.launch("*/*")
+            } else {
+                if (isSign) signFirmware() else verifyFirmware()
+            }
+        }
+    }
+
+    private fun signFirmware() = CoroutineScope(Dispatchers.IO).launch {
+        val uri = fileUri ?: return@launch
+        val input = contentResolver.openInputStream(uri) ?: return@launch
+        val data = input.readBytes()
+        input.close()
+
+        val signer = com.pqcnotary.KyberDilithiumFirmwareSigner()
+        val (ct, iv, tag, enc, sig, kpk, dpk, hash, ts) = signer.signFirmware(data)
+
+        val proof = """
+            {
+              "kyber_ciphertext": "${bytesToHex(ct)}",
+              "aes_iv": "${bytesToHex(iv)}",
+              "aes_tag": "${bytesToHex(tag)}",
+              "encrypted_firmware": "${bytesToHex(enc)}",
+              "dilithium_signature": "${bytesToHex(sig)}",
+              "kyber_public_key": "${bytesToHex(kpk)}",
+              "dilithium_public_key": "${bytesToHex(dpk)}",
+              "manifest_hash": "$hash",
+              "timestamp": "$ts",
+              "filename": "${getFileName(uri)}"
+            }
+        """.trimIndent()
+
+        val proofFile = File(cacheDir, "${getFileName(uri)}.signed.json")
+        proofFile.writeText(proof)
+
+        withContext(Dispatchers.Main) {
+            status.text = "Signed: ${proofFile.name}"
+            status.setTextColor(Color.GREEN)
+            shareProof(proofFile)
+        }
+    }
+
+    private fun verifyFirmware() = CoroutineScope(Dispatchers.IO).launch {
+        val uri = fileUri ?: return@launch
+        val input = contentResolver.openInputStream(uri) ?: return@launch
+        val json = input.reader().readText()
+        input.close()
+
+        val proof = org.json.JSONObject(json)
+        val ct = hexToBytes(proof.getString("kyber_ciphertext"))
+        val iv = hexToBytes(proof.getString("aes_iv"))
+        val tag = hexToBytes(proof.getString("aes_tag"))
+        val enc = hexToBytes(proof.getString("encrypted_firmware"))
+        val sig = hexToBytes(proof.getString("dilithium_signature"))
+        val kpk = hexToBytes(proof.getString("kyber_public_key"))
+        val dpk = hexToBytes(proof.getString("dilithium_public_key"))
+        val hash = proof.getString("manifest_hash")
+        val ts = proof.getString("timestamp")
+
+        val signer = com.pqcnotary.KyberDilithiumFirmwareSigner()
+        val valid = signer.verifyFirmware(ct, iv, tag, enc, sig, kpk, dpk, hash, ts)
+
+        withContext(Dispatchers.Main) {
+            status.text = if (valid) "Verified" else "Failed"
+            status.setTextColor(if (valid) Color.GREEN else Color.RED)
+        }
+    }
+
+    private fun shareProof(file: File) {
+        val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.provider", file)
+        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "application/json"
+            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(android.content.Intent.createChooser(intent, "Share Signed Firmware"))
+    }
+
+    private fun getFileName(uri: android.net.Uri) =
+        contentResolver.query(uri, null, null, null, null)?.use {
+            val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            it.moveToFirst()
+            it.getString(nameIndex)
+        } ?: "unknown"
+
+    private fun bytesToHex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
+    private fun hexToBytes(hex: String) = hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+}
+```
+
+```xml
+<!-- activity_main.xml -->
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView android:text="Kyber + Dilithium Firmware Signer v1.0"
+        android:textSize="20sp" android:layout_gravity="center"/>
+
+    <RadioGroup android:id="@+id/mode_group" android:orientation="horizontal"
+        android:layout_marginTop="16dp">
+        <RadioButton android:id="@+id/sign_mode" android:text="Sign" android:checked="true"/>
+        <RadioButton android:id="@+id/verify_mode" android:text="Verify"/>
+    </RadioGroup>
+
+    <Button android:id="@+id/action_btn" android:text="Choose File"
+        android:layout_marginTop="16dp"/>
+
+    <TextView android:id="@+id/status" android:layout_marginTop="24dp"
+        android:textSize="16sp"/>
+</LinearLayout>
+```
+
+---
+
+**FINAL_Android_v1.0.apk**  
+- **Sign**: Choose file → **Sign Firmware** → `.signed.json` → share  
+- **Verify**: Choose `.signed.json` → **Verify Firmware** → Verified  
+
+---
+
+**Build:**
+```bash
+./gradlew assembleRelease
+```
+
+---
+
+**Next?**  
+Say: **Make iOS**  
+→ I’ll give you **FINAL_iOS_v1.0.ipa**
+
+**Go.**

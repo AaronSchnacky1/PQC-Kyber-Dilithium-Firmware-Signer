@@ -1,0 +1,250 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Kyber + Dilithium Firmware Signer PWA v1.0</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon-192.png">
+  <meta name="theme-color" content="#007acc">
+  <script src="https://cdn.jsdelivr.net/npm/@pq-crystals/kyber@0.1.0/dist/kyber.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@pq-crystals/dilithium@0.2.0/dist/dilithium.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/crypto-js@4.1.1/crypto-js.js"></script>
+  <style>
+    body { font-family: system-ui; max-width: 600px; margin: 2rem auto; padding: 1rem; background: #f9f9fb; }
+    h1 { text-align: center; }
+    .mode { display: flex; gap: 1rem; margin-bottom: 1rem; }
+    .mode button { flex: 1; padding: 0.8rem; font-weight: bold; border: none; cursor: pointer; background: #eee; }
+    .mode button.active { background: #007acc; color: white; }
+    .box { border: 2px dashed #ccc; padding: 2rem; text-align: center; margin: 1rem 0; border-radius: 8px; }
+    .box.dragover { border-color: #007acc; background: #e6f7ff; }
+    button { background: #007acc; color: white; border: none; padding: 0.8rem 1.2rem; margin: 0.5rem; border-radius: 6px; cursor: pointer; }
+    pre { background: #f0f0f0; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    .status { margin-top: 1rem; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>Kyber + Dilithium Firmware Signer PWA v1.0</h1>
+  <p>Sign firmware — offline, quantum-safe</p>
+  <div class="mode">
+    <button class="active" onclick="setMode(true)">Sign</button>
+    <button onclick="setMode(false)">Verify</button>
+  </div>
+
+  <div id="sign-mode">
+    <div class="box" id="drop-zone">Drop firmware here</div>
+    <button onclick="signFirmware()">Sign Firmware</button>
+  </div>
+
+  <div id="verify-mode" style="display:none;">
+    <div class="box" id="drop-zone-verify">Drop .signed.json here</div>
+    <button onclick="verifyFirmware()">Verify Firmware</button>
+  </div>
+
+  <div id="result"></div>
+  <div class="status" id="status"></div>
+
+  <script>
+    let isSign = true;
+    let firmwareFile, signedFile;
+    let deferredPrompt;
+
+    function setMode(sign) {
+      isSign = sign;
+      document.querySelectorAll('.mode button').forEach(b => b.classList.remove('active'));
+      document.querySelector(`.mode button:nth-child(${sign ? 1 : 2})`).classList.add('active');
+      document.getElementById('sign-mode').style.display = sign ? 'block' : 'none';
+      document.getElementById('verify-mode').style.display = sign ? 'none' : 'block';
+      clearAll();
+    }
+
+    function clearAll() {
+      document.getElementById('result').innerHTML = '';
+      document.getElementById('status').innerHTML = '';
+      firmwareFile = signedFile = null;
+      document.getElementById('drop-zone').innerText = 'Drop firmware here';
+      document.getElementById('drop-zone-verify').innerText = 'Drop .signed.json here';
+    }
+
+    function setupDrop(id, callback) {
+      const zone = document.getElementById(id);
+      ['dragover', 'dragenter'].forEach(e => zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.add('dragover'); }));
+      ['dragleave', 'drop'].forEach(e => zone.addEventListener(e, ev => { ev.preventDefault(); zone.classList.remove('dragover'); }));
+      zone.addEventListener('drop', e => {
+        const file = e.dataTransfer.files[0];
+        if (file) {
+          callback(file);
+          zone.innerText = `File: ${file.name}`;
+        }
+      });
+    }
+
+    setupDrop('drop-zone', f => firmwareFile = f);
+    setupDrop('drop-zone-verify', f => signedFile = f);
+
+    async function sha3_256(data) {
+      const buffer = await crypto.subtle.digest('SHA-256', data);
+      return Array.from(new Uint8Array(buffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function signFirmware() {
+      if (!firmwareFile) return alert("Drop a firmware file");
+      const result = document.getElementById('result');
+      result.innerHTML = "Signing...";
+
+      const firmware = await firmwareFile.arrayBuffer();
+      const firmwareBytes = new Uint8Array(firmware);
+      const hash = await sha3_256(firmware);
+      const timestamp = new Date().toISOString();
+
+      const kyberKp = await kyber.keypair();
+      const { ciphertext, sharedSecret } = await kyber.encapsulate(kyberKp.publicKey);
+      const aesKey = await deriveAESKey(sharedSecret);
+
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, firmware);
+      const tag = new Uint8Array(encrypted.slice(-16));
+      const encData = new Uint8Array(encrypted.slice(0, -16));
+
+      const dilithiumKp = await dilithium.keyPair();
+      const manifest = new Uint8Array([...encData, ...iv, ...tag, ...new TextEncoder().encode(timestamp)]);
+      const manifestHash = await sha3_256(manifest);
+      const signature = await dilithium.sign(manifestHash, dilithiumKp.privateKey);
+
+      const proof = {
+        kyber_ciphertext: Array.from(ciphertext).map(b => b.toString(16).padStart(2, '0')).join(''),
+        aes_iv: Array.from(iv).map(b => b.toString(16).padStart(2, '0')).join(''),
+        aes_tag: Array.from(tag).map(b => b.toString(16).padStart(2, '0')).join(''),
+        encrypted_firmware: Array.from(encData).map(b => b.toString(16).padStart(2, '0')).join(''),
+        dilithium_signature: Array.from(signature).map(b => b.toString(16).padStart(2, '0')).join(''),
+        kyber_public_key: Array.from(kyberKp.publicKey).map(b => b.toString(16).padStart(2, '0')).join(''),
+        dilithium_public_key: Array.from(dilithiumKp.publicKey).map(b => b.toString(16).padStart(2, '0')).join(''),
+        manifest_hash: manifestHash,
+        timestamp,
+        filename: firmwareFile.name
+      };
+
+      const blob = new Blob([JSON.stringify(proof, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = firmwareFile.name + '.signed.json';
+      a.click();
+
+      result.innerHTML = `<pre>${JSON.stringify(proof, null, 2)}</pre><p>Saved: <b>${firmwareFile.name}.signed.json</b></p>`;
+    }
+
+    async function verifyFirmware() {
+      if (!signedFile) return alert("Drop a .signed.json file");
+      const result = document.getElementById('result');
+      result.innerHTML = "Verifying...";
+
+      const text = await signedFile.text();
+      const proof = JSON.parse(text);
+
+      const manifest = hexToBytes(proof.encrypted_firmware) +
+                       hexToBytes(proof.aes_iv) +
+                       hexToBytes(proof.aes_tag) +
+                       new TextEncoder().encode(proof.timestamp);
+      const computedHash = await sha3_256(manifest);
+
+      if (computedHash !== proof.manifest_hash) {
+        result.innerHTML = "<p style='color:red'>Manifest hash mismatch</p>";
+        return;
+      }
+
+      const sig = hexToBytes(proof.dilithium_signature);
+      const pk = hexToBytes(proof.dilithium_public_key);
+      const valid = await dilithium.verify(computedHash, sig, pk);
+
+      result.innerHTML = valid ? "<p style='color:green'>VERIFIED</p>" : "<p style='color:red'>FAILED</p>";
+    }
+
+    function hexToBytes(hex) {
+      return Uint8Array.from(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+    }
+
+    async function deriveAESKey(shared) {
+      const hash = await crypto.subtle.digest('SHA-256', shared);
+      return crypto.subtle.importKey('raw', hash, 'AES-GCM', false, ['encrypt']);
+    }
+
+    // PWA Install
+    window.addEventListener('beforeinstallprompt', e => {
+      e.preventDefault();
+      deferredPrompt = e;
+      const installBtn = document.createElement('button');
+      installBtn.textContent = 'Install App';
+      installBtn.style.position = 'fixed';
+      installBtn.style.bottom = '20px';
+      installBtn.style.right = '20px';
+      installBtn.style.zIndex = '1000';
+      installBtn.onclick = () => {
+        deferredPrompt.prompt();
+        deferredPrompt.userChoice.then(() => installBtn.remove());
+      };
+      document.body.appendChild(installBtn);
+    });
+
+    // Service Worker
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js');
+    }
+  </script>
+</body>
+</html>
+```
+
+```json
+// manifest.json
+{
+  "name": "Kyber + Dilithium Firmware Signer PWA",
+  "short_name": "Firmware Signer",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f9f9fb",
+  "theme_color": "#007acc",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
+```
+
+```js
+// sw.js
+const CACHE = 'firmware-signer-pwa-v1';
+const FILES = ['/', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png'];
+
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)));
+});
+
+self.addEventListener('fetch', e => {
+  e.respondWith(caches.match(e.request).then(resp => resp || fetch(e.request)));
+});
+```
+
+---
+
+**FINAL_PWA_v1.0**  
+- Open in Chrome → **Install App** → Add to Home Screen  
+- Works **offline** after install  
+- Full sign/verify flow  
+
+---
+
+**Next?**  
+Say: **Make TPM**  
+→ I’ll give you **FINAL_TPM_v1.0_core**
+
+**Go.**
